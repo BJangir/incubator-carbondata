@@ -62,7 +62,10 @@ object CarbonExample {
            LOAD DATA LOCAL INPATH '$testData' into table t3
            OPTIONS('USE_KETTLE'='false')
            """)
-
+   cc.sql(s"""
+           LOAD DATA LOCAL INPATH '$testData' into table t3
+           OPTIONS('USE_KETTLE'='false')
+           """)
     // Perform a query
     cc.sql("""
            SELECT country, count(salary) AS amount
