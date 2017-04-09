@@ -29,6 +29,7 @@ import org.apache.spark._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.hive.DistributionUtil
+import org.apache.spark.util.InputMetricsStats
 
 import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.constants.CarbonCommonConstants
@@ -53,7 +54,8 @@ class CarbonScanRDD(
     columnProjection: CarbonProjection,
     filterExpression: Expression,
     identifier: AbsoluteTableIdentifier,
-    @transient carbonTable: CarbonTable)
+    @transient carbonTable: CarbonTable,
+    inputMetricsStats: InputMetricsStats)
   extends RDD[InternalRow](sc, Nil) {
 
   private val queryId = sparkContext.getConf.get("queryId", System.nanoTime() + "")
@@ -118,8 +120,8 @@ class CarbonScanRDD(
           result.add(partition)
         }
       } else if (CarbonProperties.getInstance()
-        .getProperty(CarbonCommonConstants.CARBON_CUSTOM_BLOCK_DISTRIBUTION,
-          CarbonCommonConstants.CARBON_CUSTOM_BLOCK_DISTRIBUTION_DEFAULT).toBoolean) {
+		.getProperty(CarbonCommonConstants.CARBON_CUSTOM_BLOCK_DISTRIBUTION,
+       CarbonCommonConstants.CARBON_CUSTOM_BLOCK_DISTRIBUTION_DEFAULT).toBoolean) {
         // create a list of block based on split
         val blockList = splits.asScala.map(_.asInstanceOf[Distributable])
 
@@ -185,6 +187,7 @@ class CarbonScanRDD(
     val attemptContext = new TaskAttemptContextImpl(new Configuration(), attemptId)
     val format = prepareInputFormatForExecutor(attemptContext.getConfiguration)
     val inputSplit = split.asInstanceOf[CarbonSparkPartition].split.value
+    inputMetricsStats.initBytesReadCallback(context, inputSplit)
     val iterator = if (inputSplit.getAllSplits.size() > 0) {
       val model = format.getQueryModel(inputSplit, attemptContext)
       val reader = {
@@ -209,10 +212,11 @@ class CarbonScanRDD(
         private var finished = false
         private var count = 0
 
-        context.addTaskCompletionListener { context =>
-          logStatistics(queryStartTime, count, model.getStatisticsRecorder)
-          reader.close()
-        }
+      context.addTaskCompletionListener { context =>
+        logStatistics(queryStartTime, count, model.getStatisticsRecorder)
+        reader.close()
+        close()
+      }
 
         override def hasNext: Boolean = {
           if (context.isInterrupted) {
@@ -232,10 +236,17 @@ class CarbonScanRDD(
           if (!hasNext) {
             throw new java.util.NoSuchElementException("End of stream")
           }
+          if (!finished) {
+            inputMetricsStats.incrementRecordRead(1)
+          }
           havePair = false
           val value = reader.getCurrentValue
           count += 1
           value
+        }
+        private def close() {
+          val carbonSplit = split.asInstanceOf[CarbonSparkPartition]
+          inputMetricsStats.updateBytesRead(carbonSplit.split)
         }
       }
     } else {
@@ -269,7 +280,7 @@ class CarbonScanRDD(
   }
 
   def logStatistics(queryStartTime: Long, recordCount: Int,
-      recorder: QueryStatisticsRecorder): Unit = {
+                    recorder: QueryStatisticsRecorder): Unit = {
     var queryStatistic = new QueryStatistic()
     queryStatistic.addFixedTimeStatistic(QueryStatisticsConstants.EXECUTOR_PART,
       System.currentTimeMillis - queryStartTime)
